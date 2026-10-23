@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Crystal Ball — Web</title>
+    <script
+      type="text/javascript"
+      src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"
+    ></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="logo">🔮</div>
+      <div>
+        <div class="title">Crystal Ball <span class="tag">Web</span></div>
+        <div class="subtitle">Monte Carlo simulation for Excel</div>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button id="tab-model" class="tab">Model</button>
+      <button id="tab-run" class="tab">Run</button>
+      <button id="tab-results" class="tab">Results</button>
+    </nav>
+
+    <div id="status" class="status"></div>
+
+    <main>
+      <!-- MODEL -->
+      <section id="panel-model" class="panel">
+        <div class="section-head">
+          <h2>Assumptions</h2>
+          <button id="add-assumption" class="primary-btn">+ Assumption</button>
+        </div>
+        <p class="hint">Select an input cell in the sheet, then add a probability distribution for it.</p>
+        <div id="assumption-list"></div>
+
+        <div class="section-head">
+          <h2>Forecasts</h2>
+          <button id="add-forecast" class="primary-btn">+ Forecast</button>
+        </div>
+        <p class="hint">Select an output cell (usually a formula) to track across trials.</p>
+        <div id="forecast-list"></div>
+
+        <div class="section-head">
+          <h2>Correlations</h2>
+        </div>
+        <div id="correlation-list"></div>
+      </section>
+
+      <!-- RUN -->
+      <section id="panel-run" class="panel hidden">
+        <label class="field">Trials
+          <input id="cfg-trials" type="number" min="1" step="100" />
+        </label>
+        <label class="field">Sampling method
+          <select id="cfg-sampling">
+            <option value="mc">Monte Carlo</option>
+            <option value="lhs">Latin Hypercube</option>
+          </select>
+        </label>
+        <label class="field hidden" id="cfg-lhs-wrap">LHS sample size
+          <input id="cfg-lhs" type="number" min="10" max="5000" step="10" />
+        </label>
+        <label class="field">Calculation engine
+          <select id="cfg-engine">
+            <option value="hf">In-browser (fast)</option>
+            <option value="excel">Native Excel recalc (authentic, slower)</option>
+          </select>
+        </label>
+        <label class="checkbox">
+          <input id="cfg-useseed" type="checkbox" />
+          Use fixed seed (reproducible)
+        </label>
+        <label class="field small">Seed
+          <input id="cfg-seed" type="number" step="1" />
+        </label>
+
+        <button id="run-btn" class="run-btn">Run Simulation</button>
+        <button id="cancel-btn" class="cancel-btn hidden">Cancel</button>
+
+        <div id="progress-wrap" class="progress-wrap hidden">
+          <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+          <div id="progress-label" class="progress-label"></div>
+        </div>
+      </section>
+
+      <!-- RESULTS -->
+      <section id="panel-results" class="panel hidden">
+        <div id="results-body"></div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      Clean-room Monte Carlo engine · results are estimates, not Oracle Crystal Ball output.
+    </footer>
+  </body>
+</html>
