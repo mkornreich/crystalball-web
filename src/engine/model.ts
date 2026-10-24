@@ -10,6 +10,7 @@
  */
 
 import { CustomPoint, DistributionType, Params } from './distributions';
+import type { PrecisionCheck, PrecisionRequirement, PrecisionSettings } from './precision';
 
 export type SamplingMethod = 'mc' | 'lhs';
 
@@ -28,6 +29,11 @@ export interface Assumption {
   /** Optional lower/upper truncation bounds (Crystal Ball's "More" fields). */
   truncMin?: number;
   truncMax?: number;
+  /**
+   * The parameters as entered, when some were percentiles ("10%=80"); `params`
+   * then holds the parameters Crystal Ball solves from them.
+   */
+  entered?: { key: string; value: number; prob?: number }[];
 }
 
 /** A worksheet output cell whose distribution we want to characterize. */
@@ -37,6 +43,14 @@ export interface Forecast {
   name: string;
   /** Optional display units, e.g. "$" or "days". */
   units?: string;
+  /**
+   * Crystal Ball's forecast filter: trial values outside [filterMin, filterMax]
+   * are left out of the statistics, percentiles and sensitivity.
+   */
+  filterMin?: number;
+  filterMax?: number;
+  /** Crystal Ball's precision requirements on this forecast (used when precision control is on). */
+  precision?: PrecisionRequirement[];
 }
 
 /** One pairwise rank correlation between two assumptions. */
@@ -54,6 +68,15 @@ export interface SimulationConfig {
   /** Fix the seed for a reproducible run. */
   useSeed: boolean;
   seed: number;
+  /**
+   * Workbook tab order. Crystal Ball creates (and so samples) assumptions by
+   * sheet tab, then row, then column; each sheet gets its own random stream.
+   */
+  sheetOrder?: string[];
+  /** Crystal Ball's "assume zero for unspecified coefficients" correlation option. */
+  assumeZeroCorrelations?: boolean;
+  /** Precision control: stop early once every forecast's precision requirements pass. */
+  precision?: PrecisionSettings;
 }
 
 export const DEFAULT_CONFIG: SimulationConfig = {
@@ -74,6 +97,13 @@ export interface ModelEvaluator {
   readonly outputCount: number;
   /** Evaluate one trial: given N input values, return M forecast values. */
   evaluate(inputs: number[]): number[] | Promise<number[]>;
+  /**
+   * Called before the first trial of a run (and `endRun` after the last), so
+   * models with Crystal Ball spreadsheet functions can draw from the run's
+   * function stream and report on the run in progress.
+   */
+  beginRun?(run: { trials: number; seed: number | null; sampling: SamplingMethod; lhsSampleSize: number }): void;
+  endRun?(): void;
   /** Release any held resources (e.g. the HyperFormula instance). */
   dispose(): void;
 }
@@ -112,6 +142,8 @@ export interface ForecastResult {
   stats: ForecastStatistics;
   percentiles: { p: number; value: number }[];
   sensitivity: SensitivityEntry[];
+  /** The precision requirements' state at the end of the run. */
+  precision?: PrecisionCheck[];
 }
 
 export interface SimulationResult {
@@ -122,4 +154,6 @@ export interface SimulationResult {
   forecasts: ForecastResult[];
   /** Any non-fatal warnings (unsupported formula, degenerate forecast, …). */
   warnings: string[];
+  /** True when precision control ended the run before the maximum trial count. */
+  stoppedByPrecision?: boolean;
 }

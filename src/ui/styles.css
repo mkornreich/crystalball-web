@@ -247,6 +247,32 @@ main {
   font-size: 11px;
   margin-bottom: 0;
 }
+.field .pct-input {
+  font-size: 11px;
+  padding: 3px 6px;
+}
+.prec-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: -2px 0 8px 18px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.prec-row select,
+.prec-row input {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 5px;
+  font-size: 11px;
+  font-family: inherit;
+  background: #fff;
+  color: var(--text);
+}
+.prec-row input {
+  width: 64px;
+}
 .field input,
 .field select,
 .field textarea,

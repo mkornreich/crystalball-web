@@ -10,6 +10,8 @@
  * (inverse-transform) samplers in distributions.ts rely on.
  */
 
+import * as libm from './libm';
+
 const SQRT2 = Math.SQRT2;
 const SQRT2PI = Math.sqrt(2 * Math.PI);
 
@@ -40,7 +42,7 @@ export function erfc(x: number): number {
     d = ty * d - dd + ERF_COF[j];
     dd = tmp;
   }
-  const res = t * Math.exp(-z * z + 0.5 * (ERF_COF[0] + ty * d) - dd);
+  const res = t * libm.exp(-z * z + 0.5 * (ERF_COF[0] + ty * d) - dd);
   return x >= 0 ? res : 2 - res;
 }
 
@@ -60,7 +62,7 @@ export function normCdf(x: number): number {
 
 /** Standard-normal probability density φ(x). */
 export function normPdf(x: number): number {
-  return Math.exp(-0.5 * x * x) / SQRT2PI;
+  return libm.exp(-0.5 * x * x) / SQRT2PI;
 }
 
 // Coefficients for Acklam's inverse-normal rational approximation.
@@ -94,7 +96,7 @@ export function normInv(p: number): number {
   let x: number;
 
   if (p < pLow) {
-    const q = Math.sqrt(-2 * Math.log(p));
+    const q = Math.sqrt(-2 * libm.log(p));
     x =
       (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5]) /
       ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1);
@@ -105,7 +107,7 @@ export function normInv(p: number): number {
       ((((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q) /
       (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1);
   } else {
-    const q = Math.sqrt(-2 * Math.log(1 - p));
+    const q = Math.sqrt(-2 * libm.log(1 - p));
     x =
       -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5]) /
       ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1);
@@ -113,7 +115,7 @@ export function normInv(p: number): number {
 
   // One Halley step: refine against the true CDF for ~double precision.
   const e = normCdf(x) - p;
-  const u = e * SQRT2PI * Math.exp(0.5 * x * x);
+  const u = e * SQRT2PI * libm.exp(0.5 * x * x);
   x = x - u / (1 + (x * u) / 2);
   return x;
 }
@@ -137,16 +139,16 @@ export function logGamma(x: number): number {
   const tmp = x + 5.2421875;
   let ser = 0.999999999999997092;
   for (let j = 0; j < 14; j++) ser += LANCZOS[j] / ++y;
-  return (x + 0.5) * Math.log(tmp) - tmp + Math.log((SQRT2PI * ser) / x);
+  return (x + 0.5) * libm.log(tmp) - tmp + libm.log((SQRT2PI * ser) / x);
 }
 
 /** Gamma function Γ(x). */
 export function gamma(x: number): number {
   if (x < 0.5) {
     // Reflection formula for the negative half-line.
-    return Math.PI / (Math.sin(Math.PI * x) * gamma(1 - x));
+    return Math.PI / (libm.sin(Math.PI * x) * gamma(1 - x));
   }
-  return Math.exp(logGamma(x));
+  return libm.exp(logGamma(x));
 }
 
 /** Natural log of the binomial coefficient ln C(n, k). */
@@ -172,7 +174,7 @@ function gammpSeries(a: number, x: number): number {
     sum += del;
     if (Math.abs(del) < Math.abs(sum) * 1e-16) break;
   }
-  return sum * Math.exp(-x + a * Math.log(x) - gln);
+  return sum * libm.exp(-x + a * libm.log(x) - gln);
 }
 
 function gammpContinuedFraction(a: number, x: number): number {
@@ -195,7 +197,7 @@ function gammpContinuedFraction(a: number, x: number): number {
     if (Math.abs(del - 1) < 1e-16) break;
   }
   // This returns Q(a,x); caller converts.
-  return Math.exp(-x + a * Math.log(x) - gln) * h;
+  return libm.exp(-x + a * libm.log(x) - gln) * h;
 }
 
 /** Regularized lower incomplete gamma P(a, x) = γ(a,x)/Γ(a). */
@@ -236,7 +238,7 @@ const GAU_W = [
 
 function gammpApprox(a: number, x: number, lower: boolean): number {
   const a1 = a - 1;
-  const lna1 = Math.log(a1);
+  const lna1 = libm.log(a1);
   const sqrta1 = Math.sqrt(a1);
   const gln = logGamma(a);
   const xu =
@@ -246,9 +248,9 @@ function gammpApprox(a: number, x: number, lower: boolean): number {
   let sum = 0;
   for (let j = 0; j < 18; j++) {
     const t = x + (xu - x) * GAU_Y[j];
-    sum += GAU_W[j] * Math.exp(-(t - a1) + a1 * (Math.log(t) - lna1));
+    sum += GAU_W[j] * libm.exp(-(t - a1) + a1 * (libm.log(t) - lna1));
   }
-  const ans = (sum * (xu - x) * Math.exp(a1 * (lna1 - 1) - gln));
+  const ans = (sum * (xu - x) * libm.exp(a1 * (lna1 - 1) - gln));
   const p = ans > 0 ? 1 - ans : -ans;
   return lower ? (x > a1 ? 1 - p : p) : x > a1 ? p : 1 - p;
 }
@@ -263,19 +265,19 @@ export function invGammaP(p: number, a: number): number {
   if (p >= 1) return Math.max(100, a + 100 * Math.sqrt(a));
 
   if (a > 1) {
-    const lna1 = Math.log(a1);
-    const afac = Math.exp(a1 * (lna1 - 1) - gln);
+    const lna1 = libm.log(a1);
+    const afac = libm.exp(a1 * (lna1 - 1) - gln);
     const pp = p < 0.5 ? p : 1 - p;
-    const t = Math.sqrt(-2 * Math.log(pp));
+    const t = Math.sqrt(-2 * libm.log(pp));
     x = (2.30753 + t * 0.27061) / (1 + t * (0.99229 + t * 0.04481)) - t;
     if (p < 0.5) x = -x;
-    x = Math.max(1e-3, a * Math.pow(1 - 1 / (9 * a) - x / (3 * Math.sqrt(a)), 3));
+    x = Math.max(1e-3, a * libm.pow(1 - 1 / (9 * a) - x / (3 * Math.sqrt(a)), 3));
     for (let j = 0; j < 12; j++) {
       if (x <= 0) return 0;
       const err = gammaP(a, x) - p;
       let t2: number;
-      if (a > 1) t2 = afac * Math.exp(-(x - a1) + a1 * (Math.log(x) - lna1));
-      else t2 = Math.exp(-x + a1 * Math.log(x) - gln);
+      if (a > 1) t2 = afac * libm.exp(-(x - a1) + a1 * (libm.log(x) - lna1));
+      else t2 = libm.exp(-x + a1 * libm.log(x) - gln);
       const u = err / t2;
       x -= t2 = u / (1 - 0.5 * Math.min(1, u * (a1 / x - 1)));
       if (x <= 0) x = 0.5 * (x + t2);
@@ -283,12 +285,12 @@ export function invGammaP(p: number, a: number): number {
     }
   } else {
     const t = 1 - a * (0.253 + a * 0.12);
-    if (p < t) x = Math.pow(p / t, 1 / a);
-    else x = 1 - Math.log(1 - (p - t) / (1 - t));
+    if (p < t) x = libm.pow(p / t, 1 / a);
+    else x = 1 - libm.log(1 - (p - t) / (1 - t));
     for (let j = 0; j < 12; j++) {
       if (x <= 0) return 0;
       const err = gammaP(a, x) - p;
-      const t2 = Math.exp(-x + a1 * Math.log(x) - gln);
+      const t2 = libm.exp(-x + a1 * libm.log(x) - gln);
       const u = err / t2;
       let dx = u / (1 - 0.5 * Math.min(1, u * (a1 / x - 1)));
       x -= dx;
@@ -340,7 +342,7 @@ export function betaI(x: number, a: number, b: number): number {
   if (x <= 0) return 0;
   if (x >= 1) return 1;
   const lbeta = logGamma(a + b) - logGamma(a) - logGamma(b);
-  const bt = Math.exp(lbeta + a * Math.log(x) + b * Math.log(1 - x));
+  const bt = libm.exp(lbeta + a * libm.log(x) + b * libm.log(1 - x));
   if (x < (a + 1) / (a + b + 2)) return (bt * betacf(a, b, x)) / a;
   return 1 - (bt * betacf(b, a, 1 - x)) / b;
 }
@@ -356,7 +358,7 @@ export function invBetaI(p: number, a: number, b: number): number {
 
   if (a >= 1 && b >= 1) {
     const pp = p < 0.5 ? p : 1 - p;
-    const t = Math.sqrt(-2 * Math.log(pp));
+    const t = Math.sqrt(-2 * libm.log(pp));
     let xx =
       (2.30753 + t * 0.27061) / (1 + t * (0.99229 + t * 0.04481)) - t;
     if (p < 0.5) xx = -xx;
@@ -365,22 +367,22 @@ export function invBetaI(p: number, a: number, b: number): number {
     const w =
       (xx * Math.sqrt(al + h)) / h -
       (1 / (2 * b - 1) - 1 / (2 * a - 1)) * (al + 5 / 6 - 2 / (3 * h));
-    x = a / (a + b * Math.exp(2 * w));
+    x = a / (a + b * libm.exp(2 * w));
   } else {
-    const lna = Math.log(a / (a + b));
-    const lnb = Math.log(b / (a + b));
-    const t = Math.exp(a * lna) / a;
-    const u = Math.exp(b * lnb) / b;
+    const lna = libm.log(a / (a + b));
+    const lnb = libm.log(b / (a + b));
+    const t = libm.exp(a * lna) / a;
+    const u = libm.exp(b * lnb) / b;
     const w = t + u;
-    if (p < t / w) x = Math.pow(a * w * p, 1 / a);
-    else x = 1 - Math.pow(b * w * (1 - p), 1 / b);
+    if (p < t / w) x = libm.pow(a * w * p, 1 / a);
+    else x = 1 - libm.pow(b * w * (1 - p), 1 / b);
   }
 
   const afac = -logGamma(a) - logGamma(b) + logGamma(a + b);
   for (let j = 0; j < 12; j++) {
     if (x === 0 || x === 1) return x;
     const err = betaI(x, a, b) - p;
-    const t = Math.exp(a1 * Math.log(x) + b1 * Math.log(1 - x) + afac);
+    const t = libm.exp(a1 * libm.log(x) + b1 * libm.log(1 - x) + afac);
     const u = err / t;
     let dx = u / (1 - 0.5 * Math.min(1, u * (a1 / x - b1 / (1 - x))));
     x -= dx;

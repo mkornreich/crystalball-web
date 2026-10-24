@@ -8,6 +8,8 @@
     "build": "webpack --mode production",
     "build:dev": "webpack --mode development",
     "start": "webpack serve --mode development",
+    "dashboard": "webpack serve --mode development --env http --port 3100",
+    "examples": "tools/copy-cb-examples.sh",
     "dev-certs": "office-addin-dev-certs install",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

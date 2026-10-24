@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Crystal Ball Dashboard</title>
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <h1>Crystal Ball Dashboard</h1>
+          <p>Monte Carlo simulation of real Crystal Ball workbooks, in the browser</p>
+        </div>
+      </div>
+      <button id="theme" class="ghost" type="button" aria-label="Toggle dark mode">Theme</button>
+    </header>
+
+    <div class="layout">
+      <aside class="side">
+        <label class="open">
+          <input id="file" type="file" accept=".xlsx,.xlsm" />
+          <span>Open a Crystal Ball workbook…</span>
+        </label>
+        <h2>Crystal Ball examples</h2>
+        <ul id="examples" class="examples"></ul>
+      </aside>
+
+      <main id="main">
+        <section id="empty" class="empty">
+          <h2>Pick an example or open your own workbook</h2>
+          <p>
+            Every example is one of the models that ships with Oracle Crystal Ball, read straight from its workbook:
+            assumptions, forecasts, cuts, Custom tables and correlations. Runs use Crystal Ball's random number
+            generator, sampling, correlation and statistics, so a seeded run reproduces Crystal Ball's numbers.
+          </p>
+        </section>
+
+        <section id="model" class="panel" hidden>
+          <div class="panel-head">
+            <div>
+              <h2 id="model-title"></h2>
+              <p id="model-sub" class="sub"></p>
+            </div>
+          </div>
+          <div class="run">
+            <label>Trials <input id="trials" type="number" min="1" max="200000" step="100" value="1000" /></label>
+            <label>Sampling
+              <select id="sampling">
+                <option value="mc">Monte Carlo</option>
+                <option value="lhs">Latin Hypercube</option>
+              </select>
+            </label>
+            <label>Sample size <input id="lhs" type="number" min="10" max="5000" value="500" /></label>
+            <label class="check"><input id="useseed" type="checkbox" checked /> Seed</label>
+            <input id="seed" type="number" min="1" value="999" aria-label="Seed value" />
+            <label class="check" title="Stop the run once every forecast's precision target is met (Crystal Ball's precision control)"><input id="prec" type="checkbox" checked /> Precision control</label>
+            <label>every <input id="prec-every" type="number" min="1" max="100000" value="50" aria-label="Check precision every N trials" /> trials</label>
+            <label>at <input id="prec-conf" type="number" min="0.01" max="99.99" step="0.01" value="95" class="pct" aria-label="Confidence level (%)" />% confidence</label>
+            <button id="run" type="button" class="primary">Run simulation</button>
+            <div id="progress" class="progress" hidden><span></span></div>
+          </div>
+          <div id="model-warnings" class="warnings"></div>
+          <details open>
+            <summary id="asm-summary">Assumptions</summary>
+            <div class="table-wrap"><table id="asm-table" class="data"></table></div>
+          </details>
+          <details>
+            <summary id="frc-summary">Forecasts</summary>
+            <div class="table-wrap"><table id="frc-table" class="data"></table></div>
+          </details>
+          <details id="corr-block" hidden>
+            <summary id="corr-summary">Correlations</summary>
+            <div class="table-wrap"><table id="corr-table" class="data"></table></div>
+          </details>
+          <details id="wb-block">
+            <summary id="wb-summary">Workbook</summary>
+            <div class="wb">
+              <div class="wb-bar">
+                <input id="wb-name" class="wb-name" aria-label="Cell reference" spellcheck="false" autocomplete="off" />
+                <span class="fx" aria-hidden="true">fx</span>
+                <input id="wb-input" class="wb-input" aria-label="Cell contents" spellcheck="false" autocomplete="off" />
+              </div>
+              <div id="wb-grid" class="wb-grid" tabindex="0" aria-label="Worksheet cells"></div>
+              <div class="wb-foot">
+                <div id="wb-tabs" class="wb-tabs" role="tablist" aria-label="Sheets"></div>
+                <div class="wb-actions">
+                  <span id="wb-count" class="sub"></span>
+                  <button id="wb-dv" type="button" class="ghost" title="Set which values the selected cell accepts">Data validation…</button>
+                  <button id="wb-circle" type="button" class="ghost" aria-pressed="false" title="Mark the cells whose values break their validation rules">Circle invalid data</button>
+                  <button id="wb-undo" type="button" class="ghost" disabled>Undo</button>
+                  <button id="wb-revert" type="button" class="ghost" disabled>Revert all</button>
+                  <button id="wb-download" type="button" class="ghost" disabled>Download edited workbook</button>
+                </div>
+              </div>
+              <p id="wb-status" class="sub wb-status" aria-live="polite"></p>
+              <p class="sub wb-legend">
+                <span class="key cb-assumption"></span>Assumption <span class="key cb-forecast"></span>Forecast
+                <span class="key cb-decision"></span>Decision variable <span class="key edited"></span>Edited ·
+                Type or double-click to edit a cell, Enter to keep it, Esc to cancel. Drag a column or row edge in
+                the headers to resize it; double-click the edge to fit the contents. Typed values are checked against
+                the cell's data validation rule and Crystal Ball's needs (assumption cells hold numbers). Runs use the
+                edited workbook.
+              </p>
+            </div>
+          </details>
+        </section>
+
+        <section id="results" class="panel" hidden>
+          <div class="panel-head">
+            <div>
+              <h2>Forecast</h2>
+              <p id="run-sub" class="sub"></p>
+            </div>
+            <select id="forecast" aria-label="Forecast"></select>
+          </div>
+          <div id="run-warnings" class="warnings"></div>
+          <p id="stale" class="stale" hidden>
+            You've edited the workbook since this run. <button id="rerun" type="button" class="ghost">Run again</button>
+          </p>
+          <div class="tiles" id="tiles"></div>
+          <p id="prec-note" class="prec-note" hidden></p>
+          <div class="chart-card">
+            <div class="chart-head">
+              <div class="chart-title">Frequency view <span id="hist-note" class="sub"></span></div>
+              <label class="sub">Density
+                <select id="density">
+                  <option value="lowest">Lowest</option>
+                  <option value="low">Low</option>
+                  <option value="medium" selected>Medium</option>
+                  <option value="high">High</option>
+                  <option value="highest">Highest</option>
+                </select>
+              </label>
+            </div>
+            <div id="hist" class="chart"></div>
+            <div class="certainty">
+              <input id="cert-low" type="text" value="-Infinity" aria-label="Certainty range low" />
+              <span>Certainty <b id="cert-value">—</b></span>
+              <input id="cert-high" type="text" value="Infinity" aria-label="Certainty range high" />
+            </div>
+          </div>
+          <div class="grid2">
+            <div class="chart-card">
+              <div class="chart-title">Statistics view</div>
+              <div class="table-wrap tall"><table id="stats" class="data compact"></table></div>
+            </div>
+            <div class="chart-card">
+              <div class="chart-title">Percentiles view</div>
+              <div class="table-wrap tall"><table id="pct" class="data compact"></table></div>
+            </div>
+          </div>
+          <div class="chart-card">
+            <div class="chart-title">Sensitivity — contribution to variance</div>
+            <div id="tornado" class="chart"></div>
+          </div>
+          <div id="compare" class="chart-card" hidden>
+            <div class="chart-title">Compared with Crystal Ball's published result</div>
+            <p id="compare-src" class="sub"></p>
+            <div class="table-wrap tall"><table id="compare-table" class="data compact"></table></div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <dialog id="wb-alert"></dialog>
+    <dialog id="dv-dialog"></dialog>
+  </body>
+</html>

@@ -77,6 +77,19 @@
           <input id="cfg-seed" type="number" step="1" />
         </label>
 
+        <label class="checkbox" title="Stop early once every forecast's precision target is met">
+          <input id="cfg-precision" type="checkbox" />
+          Precision control (stop when targets are met)
+        </label>
+        <div class="param-grid">
+          <label class="field small">Check every (trials)
+            <input id="cfg-prec-every" type="number" min="1" step="10" />
+          </label>
+          <label class="field small">Confidence level (%)
+            <input id="cfg-prec-conf" type="number" min="0.01" max="99.99" step="0.5" />
+          </label>
+        </div>
+
         <button id="run-btn" class="run-btn">Run Simulation</button>
         <button id="cancel-btn" class="cancel-btn hidden">Cancel</button>
 

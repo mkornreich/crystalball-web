@@ -5,7 +5,6 @@
  * that both the HyperFormula and native-Excel paths feed into.
  */
 
-import { applyCorrelations, buildTargetMatrix } from './correlation';
 import { createDistribution, Distribution, truncate } from './distributions';
 import {
   Assumption,
@@ -16,8 +15,9 @@ import {
   SimulationConfig,
   SimulationResult,
 } from './model';
-import { makeRng } from './rng';
-import { generateSamples } from './sampling';
+import { checkPrecision, precisionMet } from './precision';
+import { CB_MODULUS } from './rng';
+import { generateSamples, placementOf } from './sampling';
 import { sensitivity } from './sensitivity';
 import { percentiles, summarize } from './statistics';
 
@@ -72,24 +72,42 @@ export async function runSimulation(
     if (err) throw new Error(`Assumption "${assumptions[i].name}": ${err}`);
   });
 
-  // 1. Sample every assumption into columns.
+  // 1–2. Sample (and correlate) every assumption exactly as Crystal Ball does.
   onProgress?.({ done: 0, total: n, phase: 'sampling' });
-  const rng = makeRng(config.useSeed ? config.seed : Date.now());
-  const columns = generateSamples(dists, n, config.sampling, config.lhsSampleSize, rng);
-
-  // 2. Correlate, if requested.
-  if (correlations.length) {
-    const { matrix, hasAny } = buildTargetMatrix(
-      assumptions.map((a) => a.id),
-      correlations,
+  const seed = config.useSeed ? config.seed : 1 + (Date.now() % (CB_MODULUS - 2));
+  const sample = generateSamples({
+    dists,
+    placements: assumptions.map((a) => placementOf(a.cell)),
+    ids: assumptions.map((a) => a.id),
+    trials: n,
+    method: config.sampling,
+    lhsSampleSize: config.lhsSampleSize,
+    seed,
+    sheetOrder: config.sheetOrder,
+    correlations,
+    assumeZero: config.assumeZeroCorrelations,
+  });
+  const columns = sample.columns;
+  if (sample.correlationGroups.some((g) => g.approximate))
+    warnings.push(
+      'A correlation pattern needed an approximation (a blank coefficient closing a cycle, or a matrix that took more than one consistency repair); results may differ slightly from Crystal Ball.',
     );
-    if (hasAny) applyCorrelations(columns, matrix, rng);
-  }
 
   // 3. Drive the model, trial by trial.
+  evaluator.beginRun?.({
+    trials: n,
+    seed: config.useSeed ? config.seed : null,
+    sampling: config.sampling,
+    lhsSampleSize: config.lhsSampleSize,
+  });
   const forecastValues: number[][] = Array.from({ length: m }, () => new Array<number>(n));
   const inputs = new Array<number>(k);
   let nonFiniteSeen = false;
+  // Precision control (OcbMgr): from trial 20, every `checkEvery` trials.
+  const prec = config.precision;
+  const precise = prec?.enabled ? forecasts.map((f, i) => (f.precision?.length ? i : -1)).filter((i) => i >= 0) : [];
+  const checkEvery = Math.max(1, Math.floor(prec?.checkEvery ?? 50));
+  let lastCheck = 0;
 
   for (let t = 0; t < n; t++) {
     if (shouldCancel?.()) {
@@ -107,11 +125,27 @@ export async function runSimulation(
       onProgress?.({ done: t + 1, total: n, phase: 'evaluating' });
       await sleep();
     }
+    const done = t + 1;
+    if (precise.length && done < n && done >= 20 && done - lastCheck >= checkEvery) {
+      lastCheck = Math.floor(done / checkEvery) * checkEvery;
+      const checks = precise.flatMap((fi) =>
+        checkPrecision(keptValues(fi, done), forecasts[fi].precision!, prec!.confidence),
+      );
+      if (precisionMet(checks)) return finalize(done, true);
+    }
   }
 
   return finalize(n);
 
-  function finalize(trialsRun: number): SimulationResult {
+  function keptValues(fi: number, trialsRun: number): number[] {
+    const f = forecasts[fi];
+    const lo = f.filterMin ?? -Infinity;
+    const hi = f.filterMax ?? Infinity;
+    return forecastValues[fi].slice(0, trialsRun).map((v) => (Number.isFinite(v) && v >= lo && v <= hi ? v : NaN));
+  }
+
+  function finalize(trialsRun: number, stoppedByPrecision = false): SimulationResult {
+    evaluator.endRun?.();
     onProgress?.({ done: trialsRun, total: n, phase: 'summarizing' });
     if (nonFiniteSeen)
       warnings.push(
@@ -120,7 +154,9 @@ export async function runSimulation(
 
     const results: ForecastResult[] = forecasts.map((f, fi) => {
       const values = forecastValues[fi].slice(0, trialsRun);
-      const clean = values.filter((v) => Number.isFinite(v));
+      // Error trials and filtered-out values don't count (Crystal Ball's kept trials).
+      const kept = keptValues(fi, trialsRun);
+      const clean = kept.filter((v) => Number.isFinite(v));
       const usable = clean.length ? clean : values;
       return {
         forecastId: f.id,
@@ -132,8 +168,10 @@ export async function runSimulation(
         sensitivity: sensitivity(
           assumptions,
           columns.map((c) => c.slice(0, trialsRun)),
-          values,
+          kept,
         ),
+        precision:
+          prec?.enabled && f.precision?.length ? checkPrecision(kept, f.precision, prec.confidence) : undefined,
       };
     });
 
@@ -144,6 +182,7 @@ export async function runSimulation(
       durationMs: Date.now() - started,
       forecasts: results,
       warnings,
+      ...(stoppedByPrecision ? { stoppedByPrecision } : {}),
     };
   }
 }

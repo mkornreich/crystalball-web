@@ -1,13 +1,20 @@
 /* eslint-disable */
+const fs = require('fs');
 const path = require('path');
+const webpack = require('webpack');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const CopyWebpackPlugin = require('copy-webpack-plugin');
 const devCerts = require('office-addin-dev-certs');
 
 module.exports = async (env, argv) => {
   const dev = argv.mode === 'development';
+  // `--env http` serves plain HTTP (the standalone dashboard needs no add-in certs).
+  const plainHttp = Boolean(env && env.http);
 
-  const httpsOptions = dev ? (await devCerts.getHttpsServerOptions()) : undefined;
+  const httpsOptions = dev && !plainHttp ? (await devCerts.getHttpsServerOptions()) : undefined;
+  // Which of Crystal Ball's example workbooks this build ships (none in the public build).
+  const cbExamples = path.resolve(__dirname, 'examples/crystal-ball');
+  const cbExampleFiles = fs.existsSync(cbExamples) ? fs.readdirSync(cbExamples).filter((f) => /\.xls[xm]$/i.test(f)) : [];
 
   return {
     mode: argv.mode || 'development',
@@ -15,6 +22,7 @@ module.exports = async (env, argv) => {
     entry: {
       taskpane: './src/ui/taskpane.ts',
       commands: './src/commands/commands.ts',
+      dashboard: './src/dashboard/dashboard.ts',
     },
     output: {
       path: path.resolve(__dirname, 'dist'),
@@ -53,10 +61,26 @@ module.exports = async (env, argv) => {
         template: './src/commands/commands.html',
         chunks: ['commands'],
       }),
+      new HtmlWebpackPlugin({
+        filename: 'dashboard.html',
+        template: './src/dashboard/dashboard.html',
+        chunks: ['dashboard'],
+      }),
+      // The dashboard is also the site's front page (GitHub Pages).
+      new HtmlWebpackPlugin({
+        filename: 'index.html',
+        template: './src/dashboard/dashboard.html',
+        chunks: ['dashboard'],
+      }),
+      new webpack.DefinePlugin({ __CB_EXAMPLE_FILES__: JSON.stringify(cbExampleFiles) }),
       new CopyWebpackPlugin({
         patterns: [
           { from: 'assets', to: 'assets' },
           { from: 'manifest.xml', to: 'manifest.xml' },
+          // The project's own example workbooks.
+          { from: 'examples/*.xlsx', to: 'examples/[name][ext]' },
+          // Crystal Ball's example workbooks (tools/copy-cb-examples.sh); optional.
+          { from: 'examples/crystal-ball', to: 'examples/crystal-ball', noErrorOnMissing: true },
         ],
       }),
     ],

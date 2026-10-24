@@ -27,6 +27,8 @@ import {
   SimulationConfig,
   SimulationResult,
 } from '../engine/model';
+import { solvePercentileParams, supportsPercentiles } from '../engine/percentile-params';
+import { DEFAULT_PRECISION, PrecisionStatistic } from '../engine/precision';
 import { percentileSorted } from '../engine/statistics';
 import { runSimulation, ProgressInfo } from '../engine/simulation';
 import { HyperFormulaEvaluator } from '../evaluators/hyperformula-evaluator';
@@ -196,6 +198,7 @@ function assumptionEditor(a: Assumption): HTMLElement {
   select.onchange = () => {
     a.type = select.value as DistributionType;
     a.params = defaultParams(a.type);
+    delete a.entered;
     if (a.type === 'custom' && !a.custom) a.custom = [{ value: 0, weight: 1 }];
     persist();
     renderAssumptions();
@@ -234,23 +237,62 @@ function assumptionEditor(a: Assumption): HTMLElement {
     };
     wrap.append(el('label', { class: 'field' }, ['Outcomes', ta]));
   } else {
+    // Each parameter can instead be given as its value at a percentile ("10%=80"),
+    // as in Crystal Ball; the distribution's parameters are then solved from those.
     const grid = el('div', { class: 'param-grid' });
-    for (const spec of def.params) {
+    const pctOk = supportsPercentiles(a.type);
+    const values: HTMLInputElement[] = [];
+    const pcts: HTMLInputElement[] = [];
+    const apply = () => {
+      const slots = def.params.map((spec, i) => {
+        const value = Number(values[i].value);
+        const p = Number(pcts[i]?.value);
+        return pcts[i]?.value.trim() && p > 0 && p < 100 ? { value, prob: p / 100 } : { value };
+      });
+      if (!slots.every((x) => Number.isFinite(x.value))) return;
+      if (slots.some((x) => x.prob !== undefined)) {
+        try {
+          a.params = solvePercentileParams(a.type, slots, def.params.map((x) => x.key));
+          a.entered = slots.map((x, i) => ({ key: x.prob !== undefined ? `${x.prob * 100}%` : def.params[i].key, ...x }));
+        } catch (e) {
+          setStatus(`${a.name}: ${(e as Error).message}`, 'error');
+          return;
+        }
+      } else {
+        def.params.forEach((spec, i) => (a.params[spec.key] = slots[i].value));
+        delete a.entered;
+      }
+      persist();
+      redraw();
+    };
+    def.params.forEach((spec, i) => {
+      const given = a.entered?.[i];
       const input = el('input', {
         type: 'number',
         step: 'any',
-        value: String(a.params[spec.key] ?? spec.default),
+        value: String(given ? given.value : (a.params[spec.key] ?? spec.default)),
       }) as HTMLInputElement;
-      input.oninput = () => {
-        const v = Number(input.value);
-        if (Number.isFinite(v)) {
-          a.params[spec.key] = v;
-          persist();
-          redraw();
-        }
-      };
-      grid.append(el('label', { class: 'field small' }, [spec.label, input]));
-    }
+      input.oninput = apply;
+      values.push(input);
+      const parts: (Node | string)[] = [spec.label, input];
+      if (pctOk) {
+        const pct = el('input', {
+          class: 'pct-input',
+          type: 'number',
+          step: 'any',
+          min: '0',
+          max: '100',
+          placeholder: 'at %',
+          title: `Give ${spec.label} as the value at this percentile instead`,
+          'aria-label': `${spec.label} as a percentile`,
+          value: given?.prob !== undefined ? String(given.prob * 100) : '',
+        }) as HTMLInputElement;
+        pct.oninput = apply;
+        pcts.push(pct);
+        parts.push(pct);
+      }
+      grid.append(el('label', { class: 'field small' }, parts));
+    });
     wrap.append(grid);
   }
 
@@ -345,8 +387,36 @@ function renderForecasts(): void {
     const del = el('button', { class: 'icon-btn', title: 'Delete', text: '✕' });
     del.onclick = () => deleteForecast(f.id);
     row.append(el('span', { class: 'dot blue' }), name, units, cell, del);
-    list.append(row);
+    list.append(row, forecastPrecision(f));
   }
+}
+
+/** A forecast's precision target (Crystal Ball's Define Forecast ▸ Precision). */
+function forecastPrecision(f: Forecast): HTMLElement {
+  const r = f.precision?.[0];
+  const stat = el('select', { 'aria-label': `Precision statistic for ${f.name}` }) as HTMLSelectElement;
+  for (const [v, label] of [['', 'No precision target'], ['mean', 'Mean'], ['median', 'Median'], ['stddev', 'Std. dev.'], ['percentile', 'Percentile']])
+    stat.append(el('option', { value: v, text: label }));
+  stat.value = r?.stat ?? '';
+  const pct = el('input', { type: 'number', step: 'any', min: '0.01', max: '99.99', value: String(r?.percentile ?? 90), 'aria-label': 'Percentile' }) as HTMLInputElement;
+  const value = el('input', { type: 'number', step: 'any', min: '0', value: String(r?.value ?? 5), 'aria-label': 'Required precision' }) as HTMLInputElement;
+  const unit = el('select', { 'aria-label': 'Precision units' }) as HTMLSelectElement;
+  unit.append(el('option', { value: 'rel', text: '%' }), el('option', { value: 'abs', text: 'units' }));
+  unit.value = r?.absolute ? 'abs' : 'rel';
+  const sync = () => {
+    const s = stat.value as PrecisionStatistic | '';
+    pct.classList.toggle('hidden', s !== 'percentile');
+    value.disabled = unit.disabled = !s;
+    const v = Number(value.value);
+    f.precision = s && v > 0
+      ? [{ stat: s, absolute: unit.value === 'abs', value: v, ...(s === 'percentile' ? { percentile: Number(pct.value) || 90 } : {}) }]
+      : undefined;
+    persist();
+  };
+  for (const c of [stat, pct, value, unit]) c.onchange = sync;
+  pct.classList.toggle('hidden', stat.value !== 'percentile');
+  value.disabled = unit.disabled = !stat.value;
+  return el('div', { class: 'prec-row' }, [stat, pct, el('span', { text: '±' }), value, unit]);
 }
 
 /* ----------------------------- correlations ---------------------------- */
@@ -460,6 +530,27 @@ function wireRunControls(): void {
     persist();
   };
 
+  state.config.precision ??= { ...DEFAULT_PRECISION, enabled: true };
+  const prec = state.config.precision;
+  const precOn = $('cfg-precision') as HTMLInputElement;
+  const precEvery = $('cfg-prec-every') as HTMLInputElement;
+  const precConf = $('cfg-prec-conf') as HTMLInputElement;
+  precOn.checked = prec.enabled;
+  precEvery.value = String(prec.checkEvery);
+  precConf.value = String(Number((prec.confidence * 100).toFixed(2)));
+  precOn.onchange = () => {
+    prec.enabled = precOn.checked;
+    persist();
+  };
+  precEvery.onchange = () => {
+    prec.checkEvery = Math.max(1, Math.floor(Number(precEvery.value) || 50));
+    persist();
+  };
+  precConf.onchange = () => {
+    prec.confidence = Math.min(0.9999, Math.max(0.0001, (Number(precConf.value) || 95) / 100));
+    persist();
+  };
+
   ($('run-btn') as HTMLButtonElement).onclick = run;
   ($('cancel-btn') as HTMLButtonElement).onclick = () => {
     cancelRequested = true;
@@ -520,7 +611,10 @@ async function run(): Promise<void> {
     lastResult = result;
     selectedForecastId = result.forecasts[0]?.forecastId ?? null;
     const secs = ((performance.now() - started) / 1000).toFixed(2);
-    setStatus(`Ran ${result.trials.toLocaleString()} trials in ${secs}s (${state.engine === 'hf' ? 'in-browser' : 'Excel'} engine).`);
+    setStatus(
+      `Ran ${result.trials.toLocaleString()} trials in ${secs}s (${state.engine === 'hf' ? 'in-browser' : 'Excel'} engine)` +
+        (result.stoppedByPrecision ? ' — stopped early: precision targets met.' : '.'),
+    );
     switchTab('results');
   } catch (e) {
     setStatus(`Run failed: ${(e as Error).message}`, 'error');

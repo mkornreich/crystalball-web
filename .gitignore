@@ -3,3 +3,7 @@ dist/
 *.log
 .DS_Store
 .vscode/
+examples/crystal-ball/
+# Oracle's example workbooks some tests read (npm run examples copies them in).
+src/cbfile/__tests__/fixtures/*.xlsx
+src/cbfile/__tests__/fixtures/*.xlsm

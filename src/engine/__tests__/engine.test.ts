@@ -1,12 +1,31 @@
 import { describe, it, expect } from 'vitest';
 import { createDistribution } from '../distributions';
-import { generateSamples } from '../sampling';
-import { applyCorrelations, buildTargetMatrix } from '../correlation';
+import { generateSamples, placementOf } from '../sampling';
 import { percentileSorted, spearman, summarize } from '../statistics';
 import { sensitivity } from '../sensitivity';
 import { runSimulation } from '../simulation';
-import { makeRng } from '../rng';
 import { Assumption, Forecast, ModelEvaluator, SimulationConfig } from '../model';
+import { Distribution } from '../distributions';
+
+/** Columns for `dists` on one sheet, rows 1.., as Crystal Ball would draw them. */
+function sample(
+  dists: Distribution[],
+  trials: number,
+  method: 'mc' | 'lhs',
+  seed: number,
+  correlations?: { a: string; b: string; coefficient: number }[],
+): number[][] {
+  return generateSamples({
+    dists,
+    placements: dists.map((_, i) => placementOf(`S!A${i + 1}`)),
+    ids: dists.map((_, i) => String.fromCharCode(97 + i)),
+    trials,
+    method,
+    lhsSampleSize: 500,
+    seed,
+    correlations,
+  }).columns;
+}
 
 describe('statistics', () => {
   it('summarizes a known sample', () => {
@@ -21,12 +40,13 @@ describe('statistics', () => {
     expect(s.meanStdError).toBeCloseTo(Math.sqrt(2.5) / Math.sqrt(5), 12);
   });
 
-  it('percentiles interpolate', () => {
+  it('percentiles interpolate the empirical CDF like Crystal Ball', () => {
+    // x[k] sits at cumulative probability (k+1)/n.
     const sorted = [1, 2, 3, 4, 5];
     expect(percentileSorted(sorted, 0)).toBe(1);
-    expect(percentileSorted(sorted, 50)).toBe(3);
+    expect(percentileSorted(sorted, 50)).toBe(2.5);
     expect(percentileSorted(sorted, 100)).toBe(5);
-    expect(percentileSorted(sorted, 25)).toBe(2);
+    expect(percentileSorted(sorted, 25)).toBe(1.25);
   });
 
   it('spearman handles monotone and reversed relations', () => {
@@ -40,42 +60,28 @@ describe('statistics', () => {
 describe('Latin Hypercube', () => {
   it('estimates the mean more tightly than it must', () => {
     const d = createDistribution('uniform', { min: 0, max: 10 });
-    const rng = makeRng(7);
-    const [col] = generateSamples([d], 1000, 'lhs', 500, rng);
+    const [col] = sample([d], 1000, 'lhs', 7);
     const mean = col.reduce((a, b) => a + b, 0) / col.length;
     expect(Math.abs(mean - 5)).toBeLessThan(0.1);
   });
 });
 
-describe('Iman-Conover correlation', () => {
+describe('copula correlation', () => {
   it('induces the target rank correlation while preserving marginals', () => {
     const a = createDistribution('normal', { mean: 0, stdev: 1 });
     const b = createDistribution('normal', { mean: 0, stdev: 1 });
-    const rng = makeRng(123);
-    const cols = generateSamples([a, b], 4000, 'mc', 500, rng);
-    const beforeSortedA = [...cols[0]].sort((x, y) => x - y);
-
-    const { matrix } = buildTargetMatrix(['a', 'b'], [
-      { a: 'a', b: 'b', coefficient: 0.8 },
-    ]);
-    applyCorrelations(cols, matrix, rng);
-
+    const cols = sample([a, b], 4000, 'mc', 123, [{ a: 'a', b: 'b', coefficient: 0.8 }]);
     expect(spearman(cols[0], cols[1])).toBeGreaterThan(0.74);
     expect(spearman(cols[0], cols[1])).toBeLessThan(0.86);
-    // marginal of column a is unchanged (only the pairing moved)
-    const afterSortedA = [...cols[0]].sort((x, y) => x - y);
-    expect(afterSortedA).toEqual(beforeSortedA);
+    // the first member's marginal is still a standard normal
+    const mean = cols[0].reduce((x, y) => x + y, 0) / cols[0].length;
+    expect(Math.abs(mean)).toBeLessThan(0.06);
   });
 
   it('handles a negative target', () => {
     const a = createDistribution('normal', { mean: 0, stdev: 1 });
     const b = createDistribution('uniform', { min: 0, max: 1 });
-    const rng = makeRng(55);
-    const cols = generateSamples([a, b], 3000, 'mc', 500, rng);
-    const { matrix } = buildTargetMatrix(['a', 'b'], [
-      { a: 'a', b: 'b', coefficient: -0.6 },
-    ]);
-    applyCorrelations(cols, matrix, rng);
+    const cols = sample([a, b], 3000, 'mc', 55, [{ a: 'a', b: 'b', coefficient: -0.6 }]);
     expect(spearman(cols[0], cols[1])).toBeLessThan(-0.52);
     expect(spearman(cols[0], cols[1])).toBeGreaterThan(-0.68);
   });
@@ -83,10 +89,9 @@ describe('Iman-Conover correlation', () => {
 
 describe('sensitivity (contribution to variance)', () => {
   it('ranks the dominant driver first and sums to 100%', () => {
-    const rng = makeRng(9);
     const a = createDistribution('normal', { mean: 0, stdev: 1 });
     const b = createDistribution('normal', { mean: 0, stdev: 1 });
-    const cols = generateSamples([a, b], 5000, 'mc', 500, rng);
+    const cols = sample([a, b], 5000, 'mc', 9);
     const forecast = cols[0].map((av, i) => 3 * av + cols[1][i]); // a dominates
     const assumptions: Assumption[] = [
       { id: 'a', cell: 'S!A1', name: 'A', type: 'normal', params: {} },

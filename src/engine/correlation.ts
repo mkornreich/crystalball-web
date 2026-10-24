@@ -1,169 +1,359 @@
 /**
- * Iman–Conover rank-correlation induction.
+ * Crystal Ball's assumption correlation: a per-trial Gaussian copula.
  *
- * Reorders the per-assumption sample columns so their Spearman (rank)
- * correlations approximate a target matrix, while leaving every marginal
- * exactly as sampled — only the pairing across trials changes. This is the
- * method Crystal Ball uses to correlate assumptions.
+ * Correlated assumptions fall into independent groups (connected components of
+ * the pairs the user specified). For each group Crystal Ball works in Pearson
+ * space — a Spearman target ρs becomes 2·sin(π·ρs/6) — fills pairs the user
+ * left blank with the implied value (the product of Pearson coefficients along
+ * the path that links them, unless "assume zero" is on), stores the result back
+ * as Spearman, and factors the matrix rebuilt from those Spearman values as
+ * V·Λ·Vᵀ with its own Householder + QL eigen solver. Each trial the group's
+ * uniforms u become z = Φ⁻¹(u)·√λ, y = V·z and p = Φ(y): those p are what the
+ * assumptions' inverse CDFs see, so marginals are exact and the rank
+ * correlation lands on the target.
  *
- * Algorithm (Iman & Conover, 1982):
- *   1. Build van der Waerden normal scores v_i = Φ⁻¹(i/(n+1)); each column of
- *      the score matrix S is an independent random permutation of v.
- *   2. E = corr(S). Cholesky: target C = P·Pᵀ, E = Q·Qᵀ.
- *   3. T = S · (P·Q⁻¹)ᵀ has sample correlation ≈ C.
- *   4. For each column, reorder the real samples to share T's rank pattern.
+ * Every step mirrors Crystal Ball 11.1.3 (OCB.Net Correlations, SharedMath
+ * SymMatrix / SymTriDiagMatrix), including its round trips between the two
+ * coefficient scales, so the same uniforms produce the same probabilities.
  */
 
-import { normInv } from './special';
-import { pearson } from './statistics';
-import { Rng } from './rng';
+import { ALMOST_0, inverseNormal, normalCdf } from './cbmath';
+import * as libm from './libm';
 
-/** Lower-triangular Cholesky factor L with C = L·Lᵀ, with a jitter fallback. */
-export function choleskyLower(C: number[][]): number[][] {
-  const k = C.length;
-  const L: number[][] = Array.from({ length: k }, () => new Array<number>(k).fill(0));
-  // Copy so we can add jitter to the diagonal if C is not quite PD.
-  const A = C.map((row) => row.slice());
-  let jitter = 0;
-  for (let attempt = 0; attempt < 8; attempt++) {
-    let ok = true;
-    for (let i = 0; i < k; i++) L[i].fill(0);
-    for (let i = 0; i < k && ok; i++) {
-      for (let j = 0; j <= i; j++) {
-        let sum = A[i][j];
-        for (let m = 0; m < j; m++) sum -= L[i][m] * L[j][m];
-        if (i === j) {
-          if (sum <= 0) {
-            ok = false;
-            break;
-          }
-          L[i][j] = Math.sqrt(sum);
-        } else {
-          L[i][j] = sum / L[j][j];
-        }
-      }
-    }
-    if (ok) return L;
-    jitter = jitter === 0 ? 1e-6 : jitter * 10;
-    for (let i = 0; i < k; i++) A[i][i] = C[i][i] + jitter;
-  }
-  return L;
+/** One pairwise rank correlation as entered (assumption ids). */
+export interface CorrelationPair {
+  a: string;
+  b: string;
+  coefficient: number;
 }
 
-/** Inverse of a lower-triangular matrix via forward substitution. */
-function invLowerTri(L: number[][]): number[][] {
-  const k = L.length;
-  const X: number[][] = Array.from({ length: k }, () => new Array<number>(k).fill(0));
-  for (let col = 0; col < k; col++) {
-    X[col][col] = 1 / L[col][col];
-    for (let i = col + 1; i < k; i++) {
-      let sum = 0;
-      for (let m = col; m < i; m++) sum += L[i][m] * X[m][col];
-      X[i][col] = -sum / L[i][i];
-    }
-  }
-  return X;
+/** Spearman → Pearson, as Crystal Ball converts (exactly 0 becomes 5e-16). */
+export function spearmanToPearson(s: number): number {
+  return Math.abs(s) < ALMOST_0 ? ALMOST_0 : 2 * libm.sin(s * (Math.PI / 6));
 }
 
-/** k×k matrix product. */
-function matmul(A: number[][], B: number[][]): number[][] {
-  const k = A.length;
-  const out: number[][] = Array.from({ length: k }, () => new Array<number>(k).fill(0));
-  for (let i = 0; i < k; i++) {
-    for (let m = 0; m < k; m++) {
-      const a = A[i][m];
-      if (a === 0) continue;
-      for (let j = 0; j < k; j++) out[i][j] += a * B[m][j];
-    }
-  }
-  return out;
+/** Pearson → Spearman. */
+export function pearsonToSpearman(p: number): number {
+  return (6 / Math.PI) * libm.asin(p * 0.5);
 }
 
-/** Correlation matrix of a set of equal-length columns. */
-function corrMatrix(cols: number[][]): number[][] {
-  const k = cols.length;
-  const C: number[][] = Array.from({ length: k }, () => new Array<number>(k).fill(0));
-  for (let i = 0; i < k; i++) {
-    C[i][i] = 1;
-    for (let j = i + 1; j < k; j++) {
-      const r = pearson(cols[i], cols[j]);
-      C[i][j] = r;
-      C[j][i] = r;
-    }
-  }
-  return C;
-}
-
-/** Ascending argsort (indices that would sort the array). */
-function argsort(a: number[]): number[] {
-  return Array.from({ length: a.length }, (_, i) => i).sort((x, y) => a[x] - a[y]);
+/** A factored correlation group, ready to transform each trial's uniforms. */
+export interface CorrelationGroup {
+  /** Assumption ids in Crystal Ball's matrix order. */
+  members: string[];
+  /** The adjusted Spearman matrix (what Crystal Ball reports). */
+  spearman: number[][];
+  eigenvalues: number[];
+  /** eigenvectors[j][k]: component j of the k-th eigenvector. */
+  eigenvectors: number[][];
+  /** √λ, with |λ| < 1e-8 treated as 0. */
+  sqrtEigenvalues: number[];
+  /** True when the pattern needed an approximation Crystal Ball may not share. */
+  approximate: boolean;
 }
 
 /**
- * Impose the target rank-correlation matrix on the sample columns, in place.
- * `columns[j]` is assumption j's length-n sample; `target` is k×k.
+ * Group the pairs into Crystal Ball's correlation matrices: members and groups
+ * appear in the order they are first mentioned.
  */
-export function applyCorrelations(columns: number[][], target: number[][], rng: Rng): void {
-  const k = columns.length;
-  const n = columns[0]?.length ?? 0;
-  if (k < 2 || n < 3) return;
-
-  // 1. Van der Waerden scores and a score matrix (one permuted column each).
-  const v = new Array<number>(n);
-  for (let i = 0; i < n; i++) v[i] = normInv((i + 1) / (n + 1));
-  const S: number[][] = [];
-  for (let j = 0; j < k; j++) {
-    const col = v.slice();
-    for (let i = n - 1; i > 0; i--) {
-      const r = Math.floor(rng.next() * (i + 1));
-      const t = col[i];
-      col[i] = col[r];
-      col[r] = t;
+export function buildCorrelationGroups(
+  pairs: CorrelationPair[],
+  options: { assumeZero?: boolean } = {},
+): CorrelationGroup[] {
+  const valid = pairs.filter((p) => p.a !== p.b && Number.isFinite(p.coefficient));
+  // Union-find over first-mention order.
+  const order: string[] = [];
+  const parent = new Map<string, string>();
+  const find = (x: string): string => {
+    let r = x;
+    while (parent.get(r) !== r) r = parent.get(r) as string;
+    parent.set(x, r);
+    return r;
+  };
+  for (const p of valid) {
+    for (const id of [p.a, p.b]) {
+      if (!parent.has(id)) {
+        parent.set(id, id);
+        order.push(id);
+      }
     }
-    S.push(col);
+    const ra = find(p.a);
+    const rb = find(p.b);
+    if (ra !== rb) parent.set(rb, ra);
   }
-
-  // 2. Factorize.
-  const P = choleskyLower(target);
-  const Q = choleskyLower(corrMatrix(S));
-  const Qinv = invLowerTri(Q);
-  const B = matmul(P, Qinv); // T = S · Bᵀ
-
-  // 3. Transformed scores T (as columns), then 4. rank-match the samples.
-  for (let c = 0; c < k; c++) {
-    const Tc = new Array<number>(n);
-    for (let i = 0; i < n; i++) {
-      let s = 0;
-      for (let m = 0; m < k; m++) s += S[m][i] * B[c][m];
-      Tc[i] = s;
-    }
-    const orderT = argsort(Tc); // trial indices from smallest to largest T
-    const sortedX = columns[c].slice().sort((a, b) => a - b);
-    const newCol = new Array<number>(n);
-    for (let r = 0; r < n; r++) newCol[orderT[r]] = sortedX[r];
-    columns[c] = newCol;
+  const groups = new Map<string, string[]>();
+  for (const id of order) {
+    const r = find(id);
+    if (!groups.has(r)) groups.set(r, []);
+    (groups.get(r) as string[]).push(id);
   }
+  return [...groups.values()].map((members) =>
+    factorGroup(
+      members,
+      valid.filter((p) => members.includes(p.a)),
+      options.assumeZero ?? false,
+    ),
+  );
 }
 
-/** Build a k×k target matrix from pairwise coefficients (unit diagonal). */
-export function buildTargetMatrix(
-  ids: string[],
-  pairs: { a: string; b: string; coefficient: number }[],
-): { matrix: number[][]; hasAny: boolean } {
-  const idx = new Map(ids.map((id, i) => [id, i]));
-  const k = ids.length;
-  const C: number[][] = Array.from({ length: k }, (_, i) =>
-    Array.from({ length: k }, (_, j) => (i === j ? 1 : 0)),
-  );
-  let hasAny = false;
-  for (const { a, b, coefficient } of pairs) {
-    const i = idx.get(a);
-    const j = idx.get(b);
-    if (i === undefined || j === undefined || i === j) continue;
-    const c = Math.max(-0.999, Math.min(0.999, coefficient));
-    C[i][j] = c;
-    C[j][i] = c;
-    if (c !== 0) hasAny = true;
+function factorGroup(members: string[], pairs: CorrelationPair[], assumeZero: boolean): CorrelationGroup {
+  const n = members.length;
+  const idx = new Map(members.map((id, i) => [id, i]));
+  // Pearson matrix with the specified entries; NaN marks a blank.
+  const P: number[][] = members.map((_, i) => members.map((__, j) => (i === j ? 1 : NaN)));
+  const adj: number[][] = members.map(() => []);
+  for (const p of pairs) {
+    const i = idx.get(p.a) as number;
+    const j = idx.get(p.b) as number;
+    const v = spearmanToPearson(Math.max(-1, Math.min(1, p.coefficient)));
+    if (Number.isNaN(P[i][j])) {
+      adj[i].push(j);
+      adj[j].push(i);
+    }
+    P[i][j] = v;
+    P[j][i] = v;
   }
-  return { matrix: C, hasAny };
+
+  let approximate = false;
+  if (assumeZero) {
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (Number.isNaN(P[i][j])) P[i][j] = 0;
+  } else {
+    approximate = fillImplied(P, adj);
+  }
+
+  if (repairPsd(P) > 1) approximate = true;
+
+  // Back to Spearman, then the Pearson matrix the copula factors.
+  const S = P.map((row, i) => row.map((v, j) => (i === j ? 1 : v === 0 ? 0 : pearsonToSpearman(v))));
+  const C = S.map((row, i) => row.map((v, j) => (i === j ? 1 : v === 0 ? 0 : 2 * libm.sin(v * (Math.PI / 6)))));
+  if (!isPositiveSemidefinite(C)) approximate = true;
+  const { values, vectors } = cbEigen(C);
+  return {
+    members,
+    spearman: S,
+    eigenvalues: values,
+    eigenvectors: vectors,
+    sqrtEigenvalues: values.map((l) => (Math.abs(l) < 1e-8 ? 0 : Math.sqrt(l))),
+    approximate,
+  };
+}
+
+/**
+ * Fill blanks with the implied Pearson coefficient: the product along the path
+ * linking the two assumptions, folded from the far end (Crystal Ball's order,
+ * which matters in the last bit). Exact for tree-shaped patterns; a blank that
+ * closes a cycle gets the product along one shortest path, and is reported as
+ * approximate.
+ */
+function fillImplied(P: number[][], adj: number[][]): boolean {
+  const n = P.length;
+  let edges = 0;
+  for (const a of adj) edges += a.length;
+  const isTree = edges / 2 === n - 1;
+  for (let i = 0; i < n; i++) {
+    // BFS from i: prev[j] is j's neighbour on a shortest path back to i.
+    const prev = new Array<number>(n).fill(-1);
+    const seen = new Array<boolean>(n).fill(false);
+    seen[i] = true;
+    const queue = [i];
+    while (queue.length) {
+      const u = queue.shift() as number;
+      for (const v of adj[u]) {
+        if (!seen[v]) {
+          seen[v] = true;
+          prev[v] = u;
+          queue.push(v);
+        }
+      }
+    }
+    for (let j = 0; j < n; j++) {
+      if (!Number.isNaN(P[i][j]) || !seen[j]) continue;
+      // Path i = p0, p1, …, pk = j; fold P(p0,p1)·(P(p1,p2)·(…·P(pk−1,pk))).
+      const path: number[] = [];
+      for (let v = j; v !== -1; v = prev[v]) path.unshift(v);
+      let prod = P[path[path.length - 2]][path[path.length - 1]];
+      for (let s = path.length - 3; s >= 0; s--) prod = P[path[s]][path[s + 1]] * prod;
+      P[i][j] = prod;
+      P[j][i] = prod;
+    }
+  }
+  return !isTree;
+}
+
+/**
+ * Crystal Ball's repair of an inconsistent (not positive semi-definite)
+ * matrix, in place: eigenvalues below −1e-8 are raised to 0.0625 (its floor
+ * of 2, halved while above 0.1), the spectrum is rescaled to trace n, and the
+ * off-diagonal entries are rebuilt from it, clamped to ±0.9999. One pass
+ * reproduces Crystal Ball exactly; the rare matrices that need more passes
+ * repeat it. Returns the number of passes that changed the matrix.
+ */
+function repairPsd(P: number[][]): number {
+  const n = P.length;
+  const floor = 0.0625;
+  let passes = 0;
+  for (let iter = 0; iter < 300; iter++) {
+    const { values, vectors } = cbEigen(P);
+    let changed = false;
+    let sum = 0;
+    const lam = values.map((l) => {
+      if (Math.abs(l) < 1e-8) return 0;
+      if (l < 0) {
+        changed = true;
+        sum += floor;
+        return floor;
+      }
+      sum += l;
+      return l;
+    });
+    if (!changed) break;
+    passes++;
+    const k = n / sum;
+    for (let i = 0; i < lam.length; i++) lam[i] *= k;
+    for (let i = 1; i < n; i++) {
+      for (let j = 0; j < i; j++) {
+        let v = 0;
+        for (let m = 0; m < n; m++) v += lam[m] * vectors[i][m] * vectors[j][m];
+        v = Math.max(-0.9999, Math.min(0.9999, v));
+        P[i][j] = v;
+        P[j][i] = v;
+      }
+    }
+  }
+  return passes;
+}
+
+function isPositiveSemidefinite(C: number[][]): boolean {
+  return cbEigen(C).values.every((l) => l > -1e-8);
+}
+
+/**
+ * Crystal Ball's symmetric eigen decomposition: Householder reduction to
+ * tridiagonal form, then implicit-shift QL. Eigenvalues come back in the order
+ * QL leaves them (unsorted), eigenvectors as columns of `vectors`.
+ */
+export function cbEigen(M: number[][]): { values: number[]; vectors: number[][] } {
+  const n = M.length;
+  const A = M.map((r) => r.slice());
+  const d = new Array<number>(n).fill(0); // tridiagonal diagonal
+  const e = new Array<number>(n).fill(0); // e[i] couples i and i+1
+
+  for (let i = n - 1; i > 0; i--) {
+    const l = i - 1;
+    if (l > 0) {
+      let scale = 0;
+      let h = 0;
+      for (let k = 0; k <= l; k++) scale += Math.abs(A[i][k]);
+      if (Math.abs(scale - 0) < 1e-14) {
+        e[i - 1] = A[i][l];
+      } else {
+        let hh = 0;
+        for (let k = 0; k <= l; k++) {
+          A[i][k] /= scale;
+          hh += A[i][k] * A[i][k];
+        }
+        const g = 0 - (A[i][l] >= 0 ? Math.abs(Math.sqrt(hh)) : 0 - Math.abs(Math.sqrt(hh)));
+        h = hh - A[i][l] * g;
+        A[i][l] -= g;
+        e[i - 1] = scale * g;
+        let f = 0;
+        const w = new Array<number>(l + 1);
+        for (let j = 0; j <= l; j++) {
+          A[j][i] = A[i][j] / h;
+          let gg = 0;
+          for (let k = 0; k <= j; k++) gg += A[j][k] * A[i][k];
+          for (let k = j + 1; k <= l; k++) gg += A[k][j] * A[i][k];
+          w[j] = gg / h;
+          f += A[i][j] * w[j];
+        }
+        f /= 2 * h;
+        for (let j = 0; j <= l; j++) {
+          w[j] -= f * A[i][j];
+          for (let k = 0; k <= j; k++) A[j][k] -= w[k] * A[i][j] + A[i][k] * w[j];
+        }
+      }
+      d[i] = h;
+    } else {
+      e[i - 1] = A[i][l];
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const l = i - 1;
+    if (d[i] !== 0) {
+      for (let j = 0; j <= l; j++) {
+        let g = 0;
+        for (let k = 0; k <= l; k++) g += A[i][k] * A[k][j];
+        for (let k = 0; k <= l; k++) A[k][j] -= g * A[k][i];
+      }
+    }
+    d[i] = A[i][i];
+    A[i][i] = 1;
+    for (let j = 0; j <= l; j++) {
+      A[i][j] = 0;
+      A[j][i] = 0;
+    }
+  }
+
+  // Implicit-shift QL on (d, e), rotating A's columns.
+  for (let l = 0; l < n; l++) {
+    let iter = 0;
+    for (;;) {
+      let m = l;
+      while (m < n - 1 && !(Math.abs(e[m]) < ALMOST_0)) m++;
+      if (m === l) break;
+      let g = (d[l + 1] - d[l]) / (2 * e[l]);
+      let r = Math.sqrt(g * g + 1);
+      g = d[m] - d[l] + e[l] / (g + (g >= 0 ? Math.abs(r) : -Math.abs(r)));
+      let s = 1;
+      let c = 1;
+      let p = 0;
+      let brokeAt = -1;
+      for (let i = m - 1; i >= l; i--) {
+        const f = s * e[i];
+        const b = c * e[i];
+        r = Math.sqrt(f * f + g * g);
+        if (i < n - 2) e[i + 1] = r;
+        if (r === 0) {
+          d[i] -= p;
+          e[m] = 0;
+          brokeAt = i;
+          break;
+        }
+        s = f / r;
+        c = g / r;
+        g = d[i + 1] - p;
+        r = (d[i] - g) * s + 2 * c * b;
+        p = s * r;
+        d[i + 1] = g + p;
+        g = c * r - b;
+        for (let k = 0; k < n; k++) {
+          const t = A[k][i + 1];
+          A[k][i + 1] = s * A[k][i] + c * t;
+          A[k][i] = c * A[k][i] - s * t;
+        }
+      }
+      if (r === 0 && brokeAt >= l) continue;
+      d[l] -= p;
+      e[l] = g;
+      if (m < n - 1) e[m] = 0;
+      if (++iter > 100) break;
+    }
+  }
+  return { values: d, vectors: A };
+}
+
+/**
+ * Turn one trial's uniforms for a group's members (in `members` order) into
+ * the correlated probabilities fed to their inverse CDFs.
+ */
+export function correlateTrial(group: CorrelationGroup, u: number[], out: number[]): void {
+  const n = group.members.length;
+  const z = new Array<number>(n);
+  for (let k = 0; k < n; k++) z[k] = inverseNormal(u[k]) * group.sqrtEigenvalues[k];
+  const V = group.eigenvectors;
+  for (let j = 0; j < n; j++) {
+    let y = 0;
+    for (let k = 0; k < n; k++) y += z[k] * V[j][k];
+    out[j] = normalCdf(y);
+  }
 }
